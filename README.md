@@ -11,8 +11,6 @@ bun install
 bun start
 ```
 
-Then open http://127.0.0.1:4173.
-
 ## What it does
 
 - Lists skills from three scopes:
