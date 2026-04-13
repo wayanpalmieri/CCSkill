@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>CCSkill</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --bg: #0a0a0b;
+        --panel: #101012;
+        --panel-2: #17171a;
+        --panel-3: #22222a;      /* hover */
+        --panel-4: #2d2d37;      /* stronger hover */
+        --border: #1e1e22;
+        --border-2: #2d2d33;
+        --text: #ededef;
+        --muted: #9a9aa2;
+        --dim: #5a5a60;
+        --accent: #a78bfa;        /* violet 400 */
+        --accent-soft: rgba(167, 139, 250, 0.14);   /* active tint */
+        --accent-soft-2: rgba(167, 139, 250, 0.22); /* stronger active */
+      }
+      html, body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+        font-feature-settings: "ss01", "cv11";
+        -webkit-font-smoothing: antialiased;
+      }
+      .font-mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-thumb { background: #2a2a30; border-radius: 6px; border: 2px solid var(--bg); }
+      ::-webkit-scrollbar-thumb:hover { background: #3a3a42; }
+      ::selection { background: rgba(167,139,250,0.25); }
+      kbd {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 10.5px;
+        padding: 1.5px 5px;
+        border-radius: 4px;
+        background: var(--border);
+        color: var(--muted);
+        border: 1px solid var(--border-2);
+      }
+    </style>
+  </head>
+  <body class="min-h-screen antialiased">
+    <div id="root"></div>
+    <script type="module" src="./app.tsx"></script>
+  </body>
+</html>

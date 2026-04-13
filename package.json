@@ -1,0 +1,26 @@
+{
+  "name": "ccskill",
+  "version": "0.1.0",
+  "description": "Local web app to view, toggle, and audit Claude Code skills.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wayanpalmieri/CCSkill.git"
+  },
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --hot run server.ts"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
