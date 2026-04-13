@@ -2,6 +2,8 @@
 
 Local web app to view and toggle Claude Code skills.
 
+<img width="1536" height="1024" alt="skills" src="https://github.com/user-attachments/assets/70a3a136-3b0a-4de6-9650-a627afb0863c" />
+
 ## Run
 
 ```bash
