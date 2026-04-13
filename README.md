@@ -67,5 +67,9 @@ skill yourself.
 
 CCSkill is provided as-is, with no warranty. You are solely responsible for
 the skills you enable and for any consequences of running them. The authors
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 of CCSkill accept no liability for damage, data loss, credential exposure,
 or any other harm arising from skills you choose to run.
