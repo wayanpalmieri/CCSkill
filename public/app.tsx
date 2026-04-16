@@ -1938,6 +1938,12 @@ function ScanAllOverlay({
 
   // NOTE: all hooks must run on every render, including when closed.
   // Do not put hook calls below the `if (!open) return null` guard.
+
+  // Abort any in-flight scan stream when the overlay closes.
+  useEffect(() => {
+    if (!open) abortRef.current?.abort();
+  }, [open]);
+
   const filtered = useMemo(() => {
     if (!report) return [];
     const q = query.trim().toLowerCase();
@@ -2037,11 +2043,6 @@ function ScanAllOverlay({
       setRunning(false);
     }
   };
-
-  // Abort any in-flight scan stream when the overlay closes.
-  useEffect(() => {
-    if (!open) abortRef.current?.abort();
-  }, [open]);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[var(--bg)]">
