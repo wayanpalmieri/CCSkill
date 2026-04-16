@@ -12,6 +12,8 @@ import {
 import { getSkillDetail } from "./lib/detail.ts";
 import { scanSkill } from "./lib/scan.ts";
 import { lookup as registryLookup } from "./lib/registry.ts";
+import { installSkill, type InstallScope } from "./lib/install.ts";
+import { deepScanSkill } from "./lib/deep-scan.ts";
 
 const PORT = Number(process.env.PORT ?? 4173);
 
@@ -128,6 +130,12 @@ async function pickFolderNative(): Promise<string | null> {
 const server = Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
+  // /api/scan-all with Cisco deep scan takes minutes for large skill
+  // libraries. Bun's default idleTimeout (10s) otherwise drops the response
+  // mid-stream and the browser reports "Failed to fetch". 255 is the
+  // hard maximum Bun allows; see scan-all handler below for extra safety
+  // (concurrency bump) to keep full runs under this budget.
+  idleTimeout: 255,
   development: process.env.NODE_ENV !== "production",
   routes: {
     "/": index,
@@ -191,6 +199,182 @@ const server = Bun.serve({
       return Response.json(await scanSkill(path));
     },
 
+    "/api/scan-all": async (req) => {
+      const url = new URL(req.url);
+      const deep = url.searchParams.get("deep") === "1";
+      const projectPath = url.searchParams.get("project") ?? "";
+
+      // Streaming response: emit NDJSON messages as each skill completes so
+      // the UI can show a progress bar and the connection never idles out.
+      //   {"type":"start", total, deep, startedAt}
+      //   {"type":"entry", index, total, entry}     (one per skill)
+      //   {"type":"done",  summary, finishedAt}
+      const stream = new ReadableStream({
+        async start(controller) {
+          const enc = new TextEncoder();
+          const emit = (obj: unknown) =>
+            controller.enqueue(enc.encode(JSON.stringify(obj) + "\n"));
+
+          try {
+            const [user, plugin, project] = await Promise.all([
+              scanUserSkills(),
+              scanPluginSkills(),
+              projectPath
+                ? (async () => {
+                    try {
+                      const s = await stat(join(projectPath, ".claude", "skills"));
+                      if (s.isDirectory()) return scanProjectSkills(projectPath);
+                    } catch { /* workspace */ }
+                    const r = await scanWorkspace(projectPath);
+                    return r.skills;
+                  })()
+                : Promise.resolve([]),
+            ]);
+
+            const skills = [...user, ...project, ...plugin];
+            const startedAt = new Date().toISOString();
+
+            emit({
+              type: "start",
+              total: skills.length,
+              deep,
+              startedAt,
+            });
+
+            // Concurrency limits: built-in is cheap, deep spawns Python.
+            const CONCURRENCY = deep ? 4 : 8;
+            const summary = {
+              builtin: { high: 0, med: 0, low: 0 },
+              deep: deep ? { high: 0, med: 0, low: 0 } : null,
+            };
+
+            let cursor = 0;
+            let completed = 0;
+
+            async function scanOne(s: (typeof skills)[number]) {
+              let builtin:
+                | { ok: true; report: Awaited<ReturnType<typeof scanSkill>> }
+                | { ok: false; error: string };
+              try {
+                builtin = { ok: true, report: await scanSkill(s.path) };
+              } catch (e: any) {
+                builtin = { ok: false, error: e?.message ?? String(e) };
+              }
+
+              let deepR: Awaited<ReturnType<typeof deepScanSkill>> | undefined;
+              if (deep) {
+                try {
+                  deepR = await deepScanSkill(s.path);
+                } catch (e: any) {
+                  deepR = {
+                    installed: true,
+                    installCommand: "pip install cisco-ai-skill-scanner",
+                    ran: false,
+                    error: e?.message ?? String(e),
+                  };
+                }
+              }
+
+              if (builtin.ok) {
+                for (const f of builtin.report.findings) {
+                  if (f.severity === "high") summary.builtin.high++;
+                  else if (f.severity === "med") summary.builtin.med++;
+                  else summary.builtin.low++;
+                }
+              }
+              if (summary.deep && deepR?.findings) {
+                for (const f of deepR.findings) {
+                  if (f.severity === "high") summary.deep.high++;
+                  else if (f.severity === "med") summary.deep.med++;
+                  else summary.deep.low++;
+                }
+              }
+
+              completed++;
+              emit({
+                type: "entry",
+                index: completed,
+                total: skills.length,
+                entry: {
+                  id: s.id,
+                  name: s.name,
+                  scope: s.scope,
+                  path: s.path,
+                  enabled: s.enabled,
+                  readOnly: s.readOnly,
+                  root: s.root,
+                  description: s.description,
+                  builtin,
+                  deep: deepR,
+                },
+              });
+            }
+
+            // Defensive wrapper: a bug in scanOne must not kill the whole
+            // stream. Catch per-iteration so other workers keep going.
+            await Promise.all(
+              Array.from(
+                { length: Math.min(CONCURRENCY, skills.length) },
+                async () => {
+                  while (cursor < skills.length) {
+                    const s = skills[cursor++];
+                    try {
+                      await scanOne(s);
+                    } catch (e: any) {
+                      completed++;
+                      emit({
+                        type: "entry",
+                        index: completed,
+                        total: skills.length,
+                        entry: {
+                          id: s.id,
+                          name: s.name,
+                          scope: s.scope,
+                          path: s.path,
+                          enabled: s.enabled,
+                          readOnly: s.readOnly,
+                          root: s.root,
+                          description: s.description,
+                          builtin: { ok: false, error: e?.message ?? String(e) },
+                        },
+                      });
+                    }
+                  }
+                },
+              ),
+            );
+
+            emit({
+              type: "done",
+              summary,
+              finishedAt: new Date().toISOString(),
+            });
+          } catch (e: any) {
+            emit({ type: "error", error: e?.message ?? String(e) });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "content-type": "application/x-ndjson",
+          "cache-control": "no-cache",
+          "x-accel-buffering": "no",
+        },
+      });
+    },
+
+    "/api/deep-scan": async (req) => {
+      const url = new URL(req.url);
+      const raw = url.searchParams.get("path") ?? "";
+      const behavioral = url.searchParams.get("behavioral") === "1";
+      const path = resolveAllowed(raw);
+      if (!path) return Response.json({ error: "path not allowed" }, { status: 400 });
+      return Response.json(await deepScanSkill(path, { behavioral }));
+    },
+
     "/api/registry": async (req) => {
       const url = new URL(req.url);
       const owner = url.searchParams.get("owner") ?? "";
@@ -204,6 +388,42 @@ const server = Bun.serve({
       }
       const data = await registryLookup(owner, name);
       return Response.json(data);
+    },
+
+    "/api/install": {
+      POST: async (req) => {
+        let body: {
+          source?: string;
+          skillName?: string;
+          scope?: InstallScope;
+          projectPath?: string;
+          agents?: string;
+        };
+        try {
+          body = await req.json();
+        } catch {
+          return Response.json({ error: "invalid json" }, { status: 400 });
+        }
+        if (!body.source) return Response.json({ error: "source required" }, { status: 400 });
+        if (body.scope !== "user" && body.scope !== "project") {
+          return Response.json({ error: "scope must be 'user' or 'project'" }, { status: 400 });
+        }
+        try {
+          const result = await installSkill({
+            source: body.source,
+            skillName: body.skillName,
+            scope: body.scope,
+            projectPath: body.projectPath,
+            agents: body.agents,
+          });
+          return Response.json(result, { status: result.ok ? 200 : 502 });
+        } catch (err: any) {
+          return Response.json(
+            { error: err?.message ?? String(err) },
+            { status: 400 },
+          );
+        }
+      },
     },
 
     "/api/pick-folder": {
