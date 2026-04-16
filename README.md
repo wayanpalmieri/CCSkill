@@ -84,9 +84,50 @@ Three scans are available, in increasing rigor:
    Gen Agent Trust Hub. Scraped from the rendered page (no public API), cached
    for 1 hour.
 
-**Scan all** (top-right button) opens a full-screen report that runs both (1)
-and (2) on every installed skill, streaming per-skill results as they complete.
-Cisco is silently skipped per skill if `skill-scanner` isn't installed.
+#### Cisco scanner options
+
+The Deep scan panel in each skill's detail pane exposes the following flags
+(also used by Scan All for the Cisco portion):
+
+| Option | Flag | Default | What it does |
+|---|---|---|---|
+| Policy | `--policy strict\|balanced\|permissive` | balanced | Severity thresholds — strict flags more |
+| Meta filter | `--enable-meta` | on | Cisco's false-positive filter — dramatically cleaner results |
+| Behavioral | `--use-behavioral` | off | AST dataflow analysis — slower but deeper |
+| Lenient | `--lenient` | off | Tolerates non-standard skill layouts (e.g. plugins) |
+| Verbose | `--verbose` | off | Includes rule fingerprints + metadata in findings |
+
+#### Scan all
+
+**Scan all** (top-right button) opens a full-screen overlay that runs both the
+built-in heuristic and Cisco deep scan on every installed skill.
+
+- **Live streaming**: per-skill results arrive via NDJSON as they complete.
+  A progress bar, percentage counter, and live severity totals update in
+  real time. The last 5 scanned skills are shown in a "most recent" feed.
+- **Trigger conflict check** (on by default): after per-skill scans finish,
+  runs `skill-scanner scan-all --check-overlap` across your user skills to
+  detect skills whose descriptions overlap enough to fight for the same
+  invocation trigger. Results shown as pairs with overlap scores.
+- Cisco is silently skipped per skill if `skill-scanner` isn't installed.
+- Filters: search by name, filter by scope or severity.
+- Click any row to expand findings; **Open** jumps to that skill's detail pane.
+
+### Saved reports & export
+
+Scan reports persist across close/reopen of the Scan All overlay within a
+session. For longer-term storage:
+
+- **Save** — writes the current report to `~/.claude/ccskill/reports/`.
+  Persists across page reloads, server restarts, and browser switches.
+- **JSON** — downloads the raw report as a `.json` file.
+- **MD** — downloads a Markdown report with per-skill findings tables,
+  readable in any markdown viewer or GitHub.
+- **Saved reports** section (collapsible, top of the overlay body) — lists
+  all previously saved reports. Click to restore, or delete to clean up.
+
+Reports are stored as JSON files at `~/.claude/ccskill/reports/` with
+ISO-timestamped filenames.
 
 ## Keyboard
 
