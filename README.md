@@ -15,8 +15,6 @@ bun install
 bun start
 ```
 
-Then open **http://127.0.0.1:4173**.
-
 Requires [Bun](https://bun.sh/) 1.2+. Tested on macOS. Linux should work; Windows
 support is best-effort (see [Cross-platform](#cross-platform)).
 
