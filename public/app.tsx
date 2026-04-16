@@ -94,6 +94,14 @@ interface DeepScanReport {
   durationMs?: number;
   error?: string;
 }
+interface SavedReportMeta {
+  id: string;
+  savedAt: string;
+  label: string;
+  size: number;
+  summary?: { builtin?: { high: number; med: number; low: number }; deep?: { high: number; med: number; low: number } | null };
+  scanTotal?: number;
+}
 interface OverlapPair { a: string; b: string; score?: number; reason?: string }
 interface OverlapReport {
   installed: boolean;
@@ -1090,6 +1098,12 @@ function App() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [scanAllOpen, setScanAllOpen] = useState(false);
+  // Kept here (not inside ScanAllOverlay) so the last report persists across
+  // close/open of the overlay — users don't lose a multi-minute scan just
+  // because they clicked away.
+  const [scanAllReport, setScanAllReport] = useState<ScanAllResponse | null>(null);
+  const [scanAllOverlap, setScanAllOverlap] = useState<OverlapReport | null>(null);
+  const [scanAllCheckOverlap, setScanAllCheckOverlap] = useState(true);
   const [focusIdx, setFocusIdx] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
@@ -1579,6 +1593,12 @@ function App() {
         projectPath={projectPath}
         onClose={() => setScanAllOpen(false)}
         onSelect={(id) => setSelectedId(id)}
+        report={scanAllReport}
+        setReport={setScanAllReport}
+        overlap={scanAllOverlap}
+        setOverlap={setScanAllOverlap}
+        checkOverlapEnabled={scanAllCheckOverlap}
+        setCheckOverlapEnabled={setScanAllCheckOverlap}
       />
       <ToastStack toasts={toasts} />
     </div>
@@ -1925,14 +1945,25 @@ function ScanAllOverlay({
   projectPath,
   onClose,
   onSelect,
+  report,
+  setReport,
+  overlap,
+  setOverlap,
+  checkOverlapEnabled,
+  setCheckOverlapEnabled,
 }: {
   open: boolean;
   projectPath: string;
   onClose: () => void;
   onSelect: (id: string) => void;
+  report: ScanAllResponse | null;
+  setReport: (r: ScanAllResponse | null) => void;
+  overlap: OverlapReport | null;
+  setOverlap: (o: OverlapReport | null) => void;
+  checkOverlapEnabled: boolean;
+  setCheckOverlapEnabled: (v: boolean) => void;
 }) {
   const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<ScanAllResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [progress, setProgress] = useState<{
@@ -1949,15 +1980,20 @@ function ScanAllOverlay({
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState<Scope | "all">("all");
   const [sevFilter, setSevFilter] = useState<"all" | "with-findings" | "high" | "med">("all");
-  const [checkOverlapEnabled, setCheckOverlapEnabled] = useState(true);
-  const [overlap, setOverlap] = useState<OverlapReport | null>(null);
+  // `overlap`, `report`, `checkOverlapEnabled` are now props (hoisted to App).
   const [overlapRunning, setOverlapRunning] = useState(false);
+  const [savedReports, setSavedReports] = useState<SavedReportMeta[]>([]);
+  const [savedOpen, setSavedOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (open) {
-      // Don't auto-run — let the user pick options and click Run.
-      setReport(null);
       setError(null);
+      // Fetch saved reports list on open.
+      fetch("/api/reports")
+        .then((r) => r.json())
+        .then(setSavedReports)
+        .catch(() => {});
     }
   }, [open]);
 
@@ -1995,6 +2031,91 @@ function ScanAllOverlay({
   }, [report, query, scopeFilter, sevFilter]);
 
   if (!open) return null;
+
+  const refreshSaved = () =>
+    fetch("/api/reports").then((r) => r.json()).then(setSavedReports).catch(() => {});
+
+  const handleSave = async () => {
+    if (!report) return;
+    setSaving(true);
+    try {
+      const label = `Scan ${report.total} skills — ${new Date(report.finishedAt).toLocaleDateString()}`;
+      await fetch("/api/reports/save", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label, payload: report }),
+      });
+      await refreshSaved();
+    } catch { /* toast? */ }
+    finally { setSaving(false); }
+  };
+
+  const handleLoad = async (id: string) => {
+    try {
+      const r = await fetch(`/api/reports/load?id=${encodeURIComponent(id)}`);
+      if (!r.ok) return;
+      const payload = await r.json();
+      setReport(payload);
+      setOverlap(null);
+    } catch { /* silently fail */ }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await fetch("/api/reports/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      await refreshSaved();
+    } catch { /* silent */ }
+  };
+
+  const downloadJSON = () => {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ccskill-report-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadMarkdown = () => {
+    if (!report) return;
+    const lines: string[] = [
+      `# CCSkill Scan Report`,
+      ``,
+      `**Date:** ${new Date(report.finishedAt).toLocaleString()}`,
+      `**Skills scanned:** ${report.total}`,
+      `**Built-in:** ${report.summary.builtin.high} HIGH · ${report.summary.builtin.med} MED · ${report.summary.builtin.low} LOW`,
+    ];
+    if (report.summary.deep) {
+      lines.push(`**Cisco deep:** ${report.summary.deep.high} HIGH · ${report.summary.deep.med} MED · ${report.summary.deep.low} LOW`);
+    }
+    lines.push("", "---", "");
+    for (const e of report.entries) {
+      const bf = e.builtin.ok ? e.builtin.report.findings : [];
+      const df = e.deep?.findings ?? [];
+      const all = [...bf, ...df];
+      const tag = all.length ? `(${all.filter(f => f.severity === "high").length}H ${all.filter(f => f.severity === "med").length}M ${all.filter(f => f.severity === "low").length}L)` : "clean";
+      lines.push(`## ${e.name}`, ``, `**Scope:** ${e.scope} · **Enabled:** ${e.enabled ? "yes" : "no"} · **${tag}**`, `**Path:** \`${e.path}\``, ``);
+      if (all.length) {
+        lines.push("| Severity | Scanner | Rule | Message | File |", "|---|---|---|---|---|");
+        for (const f of bf) lines.push(`| ${f.severity.toUpperCase()} | built-in | ${f.rule} | ${f.message} | ${f.file}:${f.line} |`);
+        for (const f of df) lines.push(`| ${f.severity.toUpperCase()} | cisco | ${f.rule} | ${f.message} | ${f.file}${f.line ? `:${f.line}` : ""} |`);
+        lines.push("");
+      }
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ccskill-report-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const run = async () => {
     setRunning(true);
@@ -2186,15 +2307,93 @@ function ScanAllOverlay({
               <option value="high">HIGH findings</option>
               <option value="med">MED+ findings</option>
             </select>
-            <span className="ml-auto text-[var(--dim)]">
-              {filtered.length} / {report.total} shown · finished {new Date(report.finishedAt).toLocaleTimeString()}
-            </span>
+            <div className="ml-auto flex items-center gap-1.5">
+              <span className="text-[var(--dim)]">
+                {filtered.length}/{report.total}
+              </span>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="rounded border border-[var(--border-2)] bg-[var(--panel-2)] px-2 py-0.5 text-[var(--muted)] hover:bg-[var(--panel-3)] hover:text-[var(--text)] disabled:opacity-40"
+                title="Save to ~/.claude/ccskill/reports/"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                onClick={downloadJSON}
+                className="rounded border border-[var(--border-2)] bg-[var(--panel-2)] px-2 py-0.5 text-[var(--muted)] hover:bg-[var(--panel-3)] hover:text-[var(--text)]"
+                title="Download as JSON"
+              >
+                JSON
+              </button>
+              <button
+                onClick={downloadMarkdown}
+                className="rounded border border-[var(--border-2)] bg-[var(--panel-2)] px-2 py-0.5 text-[var(--muted)] hover:bg-[var(--panel-3)] hover:text-[var(--text)]"
+                title="Download as Markdown"
+              >
+                MD
+              </button>
+            </div>
           </>
         )}
       </div>
 
       {/* body */}
       <div className="flex-1 overflow-y-auto px-6 py-5">
+        {/* saved reports section */}
+        {savedReports.length > 0 && !running && (
+          <div className="mb-5">
+            <button
+              onClick={() => setSavedOpen((v) => !v)}
+              className="mb-2 flex items-center gap-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)] hover:text-[var(--text)]"
+            >
+              <span className={`inline-block w-3 text-center text-[9px] text-[var(--dim)] transition-transform ${savedOpen ? "rotate-90" : ""}`}>
+                ▸
+              </span>
+              Saved reports ({savedReports.length})
+            </button>
+            {savedOpen && (
+              <ul className="divide-y divide-[var(--border)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--panel)]">
+                {savedReports.map((sr) => (
+                  <li
+                    key={sr.id}
+                    className="flex items-center gap-3 px-3 py-2 text-[12px]"
+                  >
+                    <button
+                      onClick={() => handleLoad(sr.id)}
+                      className="min-w-0 flex-1 truncate text-left text-[var(--text)] hover:underline"
+                      title={`Load ${sr.id}`}
+                    >
+                      {sr.label}
+                    </button>
+                    <span className="shrink-0 text-[var(--dim)]">
+                      {sr.scanTotal ?? "?"} skills
+                    </span>
+                    {sr.summary?.builtin && (
+                      <span className="shrink-0 text-[var(--dim)]">
+                        {sr.summary.builtin.high}H {sr.summary.builtin.med}M
+                      </span>
+                    )}
+                    <span className="shrink-0 text-[var(--dim)]">
+                      {formatBytes(sr.size)}
+                    </span>
+                    <span className="shrink-0 text-[var(--dim)]">
+                      {new Date(sr.savedAt).toLocaleDateString()}
+                    </span>
+                    <button
+                      onClick={() => handleDelete(sr.id)}
+                      className="shrink-0 rounded border border-[var(--border-2)] bg-[var(--panel-2)] px-1.5 py-0.5 text-[10px] text-[var(--dim)] hover:bg-red-950/30 hover:text-red-300"
+                      title="Delete saved report"
+                    >
+                      delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         {running && (
           <div className="mx-auto max-w-[820px] space-y-5">
             <div>

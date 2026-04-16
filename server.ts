@@ -14,6 +14,7 @@ import { scanSkill } from "./lib/scan.ts";
 import { lookup as registryLookup } from "./lib/registry.ts";
 import { installSkill, type InstallScope } from "./lib/install.ts";
 import { deepScanSkill, checkOverlap, type Policy, type DeepScanOpts } from "./lib/deep-scan.ts";
+import { saveReport, listReports, loadReport, deleteReport } from "./lib/reports.ts";
 
 function parseDeepOpts(url: URL): DeepScanOpts {
   const policyRaw = url.searchParams.get("policy");
@@ -423,6 +424,48 @@ const server = Bun.serve({
       }
       const data = await registryLookup(owner, name);
       return Response.json(data);
+    },
+
+    "/api/reports": async () => {
+      return Response.json(await listReports());
+    },
+
+    "/api/reports/save": {
+      POST: async (req) => {
+        try {
+          const body = (await req.json()) as { label?: string; payload: unknown };
+          if (!body.payload) return Response.json({ error: "payload required" }, { status: 400 });
+          const meta = await saveReport(body.payload, { label: body.label });
+          return Response.json(meta);
+        } catch (e: any) {
+          return Response.json({ error: e?.message ?? String(e) }, { status: 500 });
+        }
+      },
+    },
+
+    "/api/reports/load": async (req) => {
+      const url = new URL(req.url);
+      const id = url.searchParams.get("id") ?? "";
+      if (!id) return Response.json({ error: "id required" }, { status: 400 });
+      try {
+        const payload = await loadReport(id);
+        return Response.json(payload);
+      } catch (e: any) {
+        return Response.json({ error: e?.message ?? String(e) }, { status: 404 });
+      }
+    },
+
+    "/api/reports/delete": {
+      POST: async (req) => {
+        const body = (await req.json()) as { id: string };
+        if (!body.id) return Response.json({ error: "id required" }, { status: 400 });
+        try {
+          await deleteReport(body.id);
+          return Response.json({ ok: true });
+        } catch (e: any) {
+          return Response.json({ error: e?.message ?? String(e) }, { status: 500 });
+        }
+      },
     },
 
     "/api/install": {
