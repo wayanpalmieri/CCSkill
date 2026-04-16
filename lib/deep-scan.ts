@@ -41,6 +41,21 @@ export interface DeepScanReport {
   error?: string;
 }
 
+export type Policy = "strict" | "balanced" | "permissive";
+
+export interface DeepScanOpts {
+  /** Enable AST dataflow analyzer. Slower. */
+  behavioral?: boolean;
+  /** Enable meta-analyzer (false-positive filter). Default true. */
+  meta?: boolean;
+  /** Preset policy. Default "balanced". */
+  policy?: Policy;
+  /** Tolerate non-standard skill layouts. */
+  lenient?: boolean;
+  /** Include fingerprints + metadata in findings. */
+  verbose?: boolean;
+}
+
 const TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const STDERR_CAP = 16_000;
 
@@ -159,9 +174,19 @@ function normalizeFindings(root: unknown, skillPath: string): DeepFinding[] | nu
 
 const INSTALL_COMMAND = "pip install cisco-ai-skill-scanner";
 
+function deepArgs(subcommand: "scan" | "scan-all", path: string, outFile: string, opts: DeepScanOpts): string[] {
+  const args = [subcommand, path, "--format", "json", "--output", outFile];
+  if (opts.behavioral) args.push("--use-behavioral");
+  if (opts.meta !== false) args.push("--enable-meta");
+  if (opts.policy && opts.policy !== "balanced") args.push("--policy", opts.policy);
+  if (opts.lenient) args.push("--lenient");
+  if (opts.verbose) args.push("--verbose");
+  return args;
+}
+
 export async function deepScanSkill(
   skillPath: string,
-  opts: { behavioral?: boolean } = {},
+  opts: DeepScanOpts = {},
 ): Promise<DeepScanReport> {
   const inst = await isInstalled();
   if (!inst.installed) {
@@ -173,13 +198,7 @@ export async function deepScanSkill(
   }
 
   const outFile = join(tmpdir(), `ccskill-deep-${randomBytes(6).toString("hex")}.json`);
-  const args = [
-    "scan",
-    skillPath,
-    "--format", "json",
-    "--output", outFile,
-  ];
-  if (opts.behavioral) args.push("--use-behavioral");
+  const args = deepArgs("scan", skillPath, outFile, opts);
 
   const command = `skill-scanner ${args.join(" ")}`;
   const started = Date.now();
@@ -225,6 +244,135 @@ export async function deepScanSkill(
         : findings === null && raw === undefined
           ? "no parseable output"
           : `exit ${r.code}`
+      : undefined,
+  };
+}
+
+// --------------------------------------------------------------------------
+// Overlap check — runs `skill-scanner scan-all <root> --check-overlap` to
+// find skills whose descriptions collide. Result shape isn't documented;
+// we try to surface pairs and fall back to raw JSON.
+// --------------------------------------------------------------------------
+
+export interface OverlapPair {
+  a: string;
+  b: string;
+  score?: number;
+  reason?: string;
+}
+
+export interface OverlapReport {
+  installed: boolean;
+  installCommand: string;
+  ran: boolean;
+  ok?: boolean;
+  exitCode?: number;
+  command?: string;
+  pairs?: OverlapPair[];
+  findings?: DeepFinding[];   // raw findings from scan-all (for context)
+  raw?: unknown;               // untouched JSON when we couldn't normalize
+  stderr?: string;
+  durationMs?: number;
+  error?: string;
+}
+
+function normalizeOverlapPairs(root: unknown): OverlapPair[] | null {
+  if (!root || typeof root !== "object") return null;
+  const obj = root as Record<string, unknown>;
+
+  // Probe common shapes.
+  let arr: unknown = null;
+  for (const k of ["overlaps", "overlap", "pairs", "conflicts", "trigger_overlap", "description_overlap"]) {
+    if (Array.isArray(obj[k])) { arr = obj[k]; break; }
+  }
+  // Or filter the top-level findings array for overlap-type entries.
+  if (!arr && Array.isArray(obj.findings)) {
+    arr = (obj.findings as any[]).filter(
+      (f) =>
+        typeof f === "object" &&
+        /overlap|conflict|duplicate/i.test(
+          String(f.rule ?? f.rule_id ?? f.type ?? f.check ?? ""),
+        ),
+    );
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+
+  const out: OverlapPair[] = [];
+  for (const raw of arr) {
+    if (!raw || typeof raw !== "object") continue;
+    const f = raw as Record<string, unknown>;
+    // Try to pluck two skill names out of various field layouts.
+    const a = toStr(f.a ?? f.skill_a ?? f.source ?? f.left ?? (Array.isArray(f.skills) ? (f.skills as any)[0] : ""));
+    const b = toStr(f.b ?? f.skill_b ?? f.target ?? f.right ?? (Array.isArray(f.skills) ? (f.skills as any)[1] : ""));
+    if (!a || !b) continue;
+    out.push({
+      a,
+      b,
+      score: typeof f.score === "number" ? f.score : typeof f.overlap === "number" ? f.overlap : undefined,
+      reason: toStr(f.message ?? f.reason ?? f.description ?? "") || undefined,
+    });
+  }
+  return out.length ? out : null;
+}
+
+export async function checkOverlap(
+  rootPath: string,
+  opts: DeepScanOpts = {},
+): Promise<OverlapReport> {
+  const inst = await isInstalled();
+  if (!inst.installed) {
+    return {
+      installed: false,
+      installCommand: INSTALL_COMMAND,
+      ran: false,
+    };
+  }
+
+  const outFile = join(tmpdir(), `ccskill-overlap-${randomBytes(6).toString("hex")}.json`);
+  const args = deepArgs("scan-all", rootPath, outFile, opts);
+  args.push("--check-overlap", "--recursive");
+  const command = `skill-scanner ${args.join(" ")}`;
+
+  const started = Date.now();
+  const r = await run("skill-scanner", args);
+  const durationMs = Date.now() - started;
+
+  let pairs: OverlapPair[] | null = null;
+  let findings: DeepFinding[] | null = null;
+  let raw: unknown;
+  try {
+    const txt = await readFile(outFile, "utf8");
+    if (txt.trim()) {
+      raw = JSON.parse(txt);
+      pairs = normalizeOverlapPairs(raw);
+      findings = normalizeFindings(raw, rootPath);
+    }
+  } catch {
+    /* fall through */
+  } finally {
+    unlink(outFile).catch(() => {});
+  }
+
+  const ok = r.code === 0 && (pairs !== null || findings !== null || raw !== undefined);
+
+  return {
+    installed: true,
+    installCommand: INSTALL_COMMAND,
+    ran: true,
+    ok,
+    exitCode: r.code,
+    command,
+    pairs: pairs ?? undefined,
+    findings: findings ?? undefined,
+    raw: pairs || findings ? undefined : raw,
+    stderr: r.stderr.length > STDERR_CAP
+      ? r.stderr.slice(0, STDERR_CAP) + "\n...[truncated]"
+      : r.stderr,
+    durationMs,
+    error: !ok
+      ? r.timedOut
+        ? "overlap check timed out"
+        : `exit ${r.code}`
       : undefined,
   };
 }

@@ -94,6 +94,21 @@ interface DeepScanReport {
   durationMs?: number;
   error?: string;
 }
+interface OverlapPair { a: string; b: string; score?: number; reason?: string }
+interface OverlapReport {
+  installed: boolean;
+  installCommand: string;
+  ran: boolean;
+  ok?: boolean;
+  exitCode?: number;
+  command?: string;
+  pairs?: OverlapPair[];
+  findings?: DeepFinding[];
+  raw?: unknown;
+  stderr?: string;
+  durationMs?: number;
+  error?: string;
+}
 type AuditStatus = "pass" | "warn" | "fail";
 interface RegistryAudit { provider: string; status: AuditStatus }
 interface RegistryEntry {
@@ -1589,6 +1604,10 @@ function DetailPane({
   const [deep, setDeep] = useState<DeepScanReport | null>(null);
   const [deepRunning, setDeepRunning] = useState(false);
   const [deepBehavioral, setDeepBehavioral] = useState(false);
+  const [deepPolicy, setDeepPolicy] = useState<"strict" | "balanced" | "permissive">("balanced");
+  const [deepMeta, setDeepMeta] = useState(true);
+  const [deepLenient, setDeepLenient] = useState(false);
+  const [deepVerbose, setDeepVerbose] = useState(false);
 
   // Look up skills.sh whenever detail resolves and we can guess an owner.
   useEffect(() => {
@@ -1630,7 +1649,11 @@ function DetailPane({
     try {
       const qs = new URLSearchParams({
         path: skill.path,
+        policy: deepPolicy,
+        meta: deepMeta ? "1" : "0",
         ...(deepBehavioral ? { behavioral: "1" } : {}),
+        ...(deepLenient ? { lenient: "1" } : {}),
+        ...(deepVerbose ? { verbose: "1" } : {}),
       });
       const r = await fetch(`/api/deep-scan?${qs}`);
       const j: DeepScanReport = await r.json();
@@ -1643,7 +1666,7 @@ function DetailPane({
         error: e?.message ?? String(e),
       });
     } finally { setDeepRunning(false); }
-  }, [skill, deepBehavioral]);
+  }, [skill, deepBehavioral, deepPolicy, deepMeta, deepLenient, deepVerbose]);
 
   const runScan = useCallback(async () => {
     if (!skill) return;
@@ -1828,6 +1851,14 @@ function DetailPane({
                 running={deepRunning}
                 behavioral={deepBehavioral}
                 onBehavioralChange={setDeepBehavioral}
+                policy={deepPolicy}
+                onPolicyChange={setDeepPolicy}
+                meta={deepMeta}
+                onMetaChange={setDeepMeta}
+                lenient={deepLenient}
+                onLenientChange={setDeepLenient}
+                verbose={deepVerbose}
+                onVerboseChange={setDeepVerbose}
                 onRun={runDeepScan}
               />
             </Section>
@@ -1918,6 +1949,9 @@ function ScanAllOverlay({
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState<Scope | "all">("all");
   const [sevFilter, setSevFilter] = useState<"all" | "with-findings" | "high" | "med">("all");
+  const [checkOverlapEnabled, setCheckOverlapEnabled] = useState(true);
+  const [overlap, setOverlap] = useState<OverlapReport | null>(null);
+  const [overlapRunning, setOverlapRunning] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -1966,6 +2000,7 @@ function ScanAllOverlay({
     setRunning(true);
     setError(null);
     setReport(null);
+    setOverlap(null);
     setProgress({ total: 0, completed: 0, currentEntries: [], builtinHigh: 0, builtinMed: 0, builtinLow: 0, deepHigh: 0, deepMed: 0, deepLow: 0 });
     const collected: ScanAllEntry[] = [];
     let startedAt = "";
@@ -2031,6 +2066,26 @@ function ScanAllOverlay({
               summary: msg.summary,
               entries: collected,
             });
+            // Overlap check runs only over user-scope skills — it's a
+            // whole-library trigger-conflict probe, not a per-project check.
+            if (checkOverlapEnabled) {
+              setOverlapRunning(true);
+              try {
+                const or = await fetch(`/api/overlap?scope=user`, { signal: ctrl.signal });
+                if (or.ok) setOverlap(await or.json());
+              } catch (e: any) {
+                if (e?.name !== "AbortError") {
+                  setOverlap({
+                    installed: false,
+                    installCommand: "pip install cisco-ai-skill-scanner",
+                    ran: false,
+                    error: e?.message ?? String(e),
+                  });
+                }
+              } finally {
+                setOverlapRunning(false);
+              }
+            }
           } else if (msg.type === "error") {
             throw new Error(msg.error);
           }
@@ -2087,9 +2142,19 @@ function ScanAllOverlay({
         >
           {running ? "Scanning…" : report ? "Re-run" : "Run scan (both scanners)"}
         </button>
+        <label className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+          <input
+            type="checkbox"
+            checked={checkOverlapEnabled}
+            onChange={(e) => setCheckOverlapEnabled(e.target.checked)}
+            disabled={running}
+            className="accent-[var(--accent)]"
+          />
+          <span>Check trigger conflicts</span>
+          <span className="text-[var(--dim)]">(cross-skill description overlap)</span>
+        </label>
         <span className="text-[11px] text-[var(--dim)]">
-          Runs built-in heuristic + Cisco deep scan on every skill. Cisco is
-          skipped per-skill if <code className="font-mono">skill-scanner</code> isn't installed.
+          Cisco skipped per-skill if <code className="font-mono">skill-scanner</code> isn't installed.
         </span>
 
         {report && (
@@ -2258,22 +2323,101 @@ function ScanAllOverlay({
         )}
 
         {report && !running && (
-          <ul className="space-y-2">
-            {filtered.length === 0 && (
-              <li className="py-10 text-center text-[13px] text-[var(--dim)]">
-                No skills match the current filter.
-              </li>
+          <>
+            {(overlap || overlapRunning) && (
+              <div className="mb-5">
+                <div className="mb-2 flex items-baseline justify-between">
+                  <h3 className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)]">
+                    Trigger conflicts (user skills)
+                  </h3>
+                  <span className="text-[11px] text-[var(--dim)]">
+                    cross-skill description overlap · cisco-ai-skill-scanner
+                  </span>
+                </div>
+                <OverlapResult report={overlap} running={overlapRunning} />
+              </div>
             )}
-            {filtered.map((e) => (
-              <ScanAllRow
-                key={e.id}
-                entry={e}
-                onSelect={() => { onSelect(e.id); onClose(); }}
-              />
-            ))}
-          </ul>
+
+            <ul className="space-y-2">
+              {filtered.length === 0 && (
+                <li className="py-10 text-center text-[13px] text-[var(--dim)]">
+                  No skills match the current filter.
+                </li>
+              )}
+              {filtered.map((e) => (
+                <ScanAllRow
+                  key={e.id}
+                  entry={e}
+                  onSelect={() => { onSelect(e.id); onClose(); }}
+                />
+              ))}
+            </ul>
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+function OverlapResult({ report, running }: { report: OverlapReport | null; running: boolean }) {
+  if (running) {
+    return <div className="text-[13px] text-[var(--muted)]">Checking for trigger conflicts…</div>;
+  }
+  if (!report) return null;
+  if (!report.installed) {
+    return (
+      <div className="rounded-md border border-[var(--border)] bg-[var(--panel-2)] p-3 text-[13px] text-[var(--muted)]">
+        Overlap check skipped — Cisco <code className="font-mono">skill-scanner</code> not installed.
+      </div>
+    );
+  }
+  if (report.error && !report.pairs?.length && !report.raw) {
+    return (
+      <div className="rounded-md border border-red-900/50 bg-red-950/20 p-3 text-[13px] text-red-200">
+        Overlap check failed: {report.error}
+      </div>
+    );
+  }
+  if (!report.pairs?.length && !report.raw) {
+    return (
+      <div className="rounded-md border border-emerald-900/40 bg-emerald-950/15 p-3 text-[13px] text-emerald-300">
+        No significant trigger overlap detected between user skills.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {report.pairs && report.pairs.length > 0 && (
+        <ul className="divide-y divide-[var(--border)] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--panel)]">
+          {report.pairs.map((p, i) => (
+            <li key={i} className="flex items-start gap-3 p-3 text-[12.5px]">
+              <span className="font-medium text-[var(--text)]">{p.a}</span>
+              <span className="text-[var(--dim)]">⇄</span>
+              <span className="font-medium text-[var(--text)]">{p.b}</span>
+              {typeof p.score === "number" && (
+                <span className="ml-auto shrink-0 font-mono text-[11px] text-[var(--muted)]">
+                  {(p.score * 100).toFixed(0)}%
+                </span>
+              )}
+              {p.reason && (
+                <span className="w-full shrink basis-full pt-1 text-[11.5px] text-[var(--muted)]">
+                  {p.reason}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!report.pairs?.length && report.raw != null && (
+        <details>
+          <summary className="cursor-pointer text-[11px] text-[var(--dim)] hover:text-[var(--muted)]">
+            Raw overlap JSON (CCSkill could not normalize the schema)
+          </summary>
+          <pre className="mt-2 max-h-[40vh] overflow-auto rounded-md bg-[var(--panel-2)] p-3 font-mono text-[11.5px] text-[var(--muted)]">
+            {JSON.stringify(report.raw, null, 2)}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }
@@ -2402,46 +2546,115 @@ function ScanAllRow({
   );
 }
 
+function DeepOptions({
+  behavioral, onBehavioralChange,
+  policy, onPolicyChange,
+  meta, onMetaChange,
+  lenient, onLenientChange,
+  verbose, onVerboseChange,
+  compact,
+}: {
+  behavioral: boolean;
+  onBehavioralChange: (v: boolean) => void;
+  policy: "strict" | "balanced" | "permissive";
+  onPolicyChange: (v: "strict" | "balanced" | "permissive") => void;
+  meta: boolean;
+  onMetaChange: (v: boolean) => void;
+  lenient: boolean;
+  onLenientChange: (v: boolean) => void;
+  verbose: boolean;
+  onVerboseChange: (v: boolean) => void;
+  compact?: boolean;
+}) {
+  const checkbox = (label: string, hint: string, v: boolean, on: (x: boolean) => void) => (
+    <label className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
+      <input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} className="accent-[var(--accent)]" />
+      <span>
+        <code className="font-mono">{label}</code>
+        <span className="ml-1.5 text-[11px] text-[var(--dim)]">{hint}</span>
+      </span>
+    </label>
+  );
+  return (
+    <div className={`space-y-2 ${compact ? "" : "rounded-md border border-[var(--border)] bg-[var(--panel-2)] p-3"}`}>
+      <div className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
+        <span><code className="font-mono">--policy</code></span>
+        <select
+          value={policy}
+          onChange={(e) => onPolicyChange(e.target.value as any)}
+          className="rounded border border-[var(--border)] bg-[var(--panel)] px-1.5 py-0.5 text-[12px] text-[var(--text)] focus:border-[var(--accent)]/60 focus:outline-none"
+        >
+          <option value="permissive">permissive</option>
+          <option value="balanced">balanced</option>
+          <option value="strict">strict</option>
+        </select>
+        <span className="text-[11px] text-[var(--dim)]">severity thresholds</span>
+      </div>
+      {checkbox("--enable-meta", "false-positive filter (recommended on)", meta, onMetaChange)}
+      {checkbox("--use-behavioral", "AST dataflow, slower", behavioral, onBehavioralChange)}
+      {checkbox("--lenient", "tolerate non-standard skill layouts", lenient, onLenientChange)}
+      {checkbox("--verbose", "include fingerprints + metadata", verbose, onVerboseChange)}
+    </div>
+  );
+}
+
 function DeepScanBlock({
   report,
   running,
   behavioral,
   onBehavioralChange,
+  policy,
+  onPolicyChange,
+  meta,
+  onMetaChange,
+  lenient,
+  onLenientChange,
+  verbose,
+  onVerboseChange,
   onRun,
 }: {
   report: DeepScanReport | null;
   running: boolean;
   behavioral: boolean;
   onBehavioralChange: (v: boolean) => void;
+  policy: "strict" | "balanced" | "permissive";
+  onPolicyChange: (v: "strict" | "balanced" | "permissive") => void;
+  meta: boolean;
+  onMetaChange: (v: boolean) => void;
+  lenient: boolean;
+  onLenientChange: (v: boolean) => void;
+  verbose: boolean;
+  onVerboseChange: (v: boolean) => void;
   onRun: () => void;
 }) {
+  const optsNode = (
+    <DeepOptions
+      behavioral={behavioral} onBehavioralChange={onBehavioralChange}
+      policy={policy} onPolicyChange={onPolicyChange}
+      meta={meta} onMetaChange={onMetaChange}
+      lenient={lenient} onLenientChange={onLenientChange}
+      verbose={verbose} onVerboseChange={onVerboseChange}
+    />
+  );
+
   if (running) {
     return (
       <div className="text-[13px] text-[var(--muted)]">
-        Running Cisco skill-scanner{behavioral ? " with behavioral analysis" : ""}…
+        Running Cisco skill-scanner with policy <span className="text-[var(--text)]">{policy}</span>
+        {behavioral ? " + behavioral" : ""}{verbose ? " + verbose" : ""}{lenient ? " + lenient" : ""}…
       </div>
     );
   }
 
   if (!report) {
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
         <div className="text-[13px] text-[var(--muted)]">
           Optional second opinion from Cisco AI Defense's skill-scanner —
           YARA rules, AST dataflow, optional LLM-as-judge, and bytecode
           verification tailored to AI agent skills.
         </div>
-        <label className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
-          <input
-            type="checkbox"
-            checked={behavioral}
-            onChange={(e) => onBehavioralChange(e.target.checked)}
-            className="accent-[var(--accent)]"
-          />
-          <span>
-            <code className="font-mono">--use-behavioral</code> (deeper, slower)
-          </span>
-        </label>
+        {optsNode}
         <button
           onClick={onRun}
           className="rounded-md border border-[var(--border-2)] bg-[var(--panel-2)] px-2.5 py-1 text-[12px] text-[var(--text)] hover:border-[var(--accent)]/40"
@@ -2547,16 +2760,14 @@ function DeepScanBlock({
         </details>
       )}
 
-      <div className="flex items-center justify-between text-[11px] text-[var(--dim)]">
-        <label className="flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={behavioral}
-            onChange={(e) => onBehavioralChange(e.target.checked)}
-            className="accent-[var(--accent)]"
-          />
-          <span>behavioral</span>
-        </label>
+      <details>
+        <summary className="cursor-pointer text-[11px] text-[var(--dim)] hover:text-[var(--muted)]">
+          Scanner options
+        </summary>
+        <div className="mt-2">{optsNode}</div>
+      </details>
+
+      <div className="flex items-center justify-end text-[11px] text-[var(--dim)]">
         <button
           onClick={onRun}
           className="rounded border border-[var(--border-2)] bg-[var(--panel-2)] px-2 py-0.5 text-[11px] text-[var(--muted)] hover:bg-[var(--panel-3)] hover:text-[var(--text)]"

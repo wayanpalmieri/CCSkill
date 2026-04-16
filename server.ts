@@ -13,7 +13,23 @@ import { getSkillDetail } from "./lib/detail.ts";
 import { scanSkill } from "./lib/scan.ts";
 import { lookup as registryLookup } from "./lib/registry.ts";
 import { installSkill, type InstallScope } from "./lib/install.ts";
-import { deepScanSkill } from "./lib/deep-scan.ts";
+import { deepScanSkill, checkOverlap, type Policy, type DeepScanOpts } from "./lib/deep-scan.ts";
+
+function parseDeepOpts(url: URL): DeepScanOpts {
+  const policyRaw = url.searchParams.get("policy");
+  const policy: Policy | undefined =
+    policyRaw === "strict" || policyRaw === "permissive" || policyRaw === "balanced"
+      ? (policyRaw as Policy)
+      : undefined;
+  return {
+    behavioral: url.searchParams.get("behavioral") === "1",
+    // meta defaults ON unless explicitly disabled.
+    meta: url.searchParams.get("meta") !== "0",
+    policy,
+    lenient: url.searchParams.get("lenient") === "1",
+    verbose: url.searchParams.get("verbose") === "1",
+  };
+}
 
 const PORT = Number(process.env.PORT ?? 4173);
 
@@ -203,6 +219,7 @@ const server = Bun.serve({
       const url = new URL(req.url);
       const deep = url.searchParams.get("deep") === "1";
       const projectPath = url.searchParams.get("project") ?? "";
+      const deepOpts = parseDeepOpts(url);
 
       // Streaming response: emit NDJSON messages as each skill completes so
       // the UI can show a progress bar and the connection never idles out.
@@ -264,7 +281,7 @@ const server = Bun.serve({
               let deepR: Awaited<ReturnType<typeof deepScanSkill>> | undefined;
               if (deep) {
                 try {
-                  deepR = await deepScanSkill(s.path);
+                  deepR = await deepScanSkill(s.path, deepOpts);
                 } catch (e: any) {
                   deepR = {
                     installed: true,
@@ -369,10 +386,28 @@ const server = Bun.serve({
     "/api/deep-scan": async (req) => {
       const url = new URL(req.url);
       const raw = url.searchParams.get("path") ?? "";
-      const behavioral = url.searchParams.get("behavioral") === "1";
       const path = resolveAllowed(raw);
       if (!path) return Response.json({ error: "path not allowed" }, { status: 400 });
-      return Response.json(await deepScanSkill(path, { behavioral }));
+      return Response.json(await deepScanSkill(path, parseDeepOpts(url)));
+    },
+
+    "/api/overlap": async (req) => {
+      // Runs `skill-scanner scan-all <root> --check-overlap`. The root must
+      // be one of the allowed skill trees. We default to ~/.claude/skills.
+      const url = new URL(req.url);
+      const scope = url.searchParams.get("scope") ?? "user";
+      let root: string;
+      if (scope === "user") {
+        root = join(HOME, ".claude", "skills");
+      } else if (scope === "project") {
+        const p = url.searchParams.get("path");
+        const resolved = p ? resolveAllowed(p) : null;
+        if (!resolved) return Response.json({ error: "invalid or missing project path" }, { status: 400 });
+        root = resolved;
+      } else {
+        return Response.json({ error: "scope must be 'user' or 'project'" }, { status: 400 });
+      }
+      return Response.json(await checkOverlap(root, parseDeepOpts(url)));
     },
 
     "/api/registry": async (req) => {
