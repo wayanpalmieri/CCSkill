@@ -4,7 +4,7 @@ Local web app to view, toggle, install, and audit your Claude Code skills.
 
 <img width="1536" height="1024" alt="skills" src="https://github.com/user-attachments/assets/70a3a136-3b0a-4de6-9650-a627afb0863c" />
 
-Runs entirely on `127.0.0.1`. No cloud, no telemetry, no network access except
+Runs entirely locally. No cloud, no telemetry, no network access except
 optional best-effort reads from skills.sh and optional outbound calls made by
 the install CLI or the Cisco scanner you opt into.
 
